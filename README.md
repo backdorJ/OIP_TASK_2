@@ -19,7 +19,7 @@
 # Клонировать репозиторий и перейти в папку проекта
 cd OIP_TASK_2
 
-# Создать виртуальное окружение (по желанию)
+# Создать виртуальное окружение
 python3 -m venv .venv
 source .venv/bin/activate   # Linux/macOS
 # или: .venv\Scripts\activate   # Windows
