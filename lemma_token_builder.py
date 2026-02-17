@@ -19,7 +19,7 @@ process_pages.py
    - без "служебных" частей речи: предлоги, союзы, частицы, междометия (по pymorphy2)
    - минимум мусора
 5) Группировка по леммам
-6) Пишет tokens.txt и lemmas.txt
+6) Для каждой страницы создаёт папку page1, page2, … с файлами tokens.txt и lemmas.txt
 """
 
 import os
@@ -31,8 +31,7 @@ import pymorphy2
 import pymorphy2_dicts_ru
 
 PAGES_DIR = "pages"
-TOKENS_OUT = "tokens.txt"
-LEMMAS_OUT = "lemmas.txt"
+OUTPUT_DIR = "tokenized_pages"
 
 # Только русские слова (включая ё), длина >= 2
 RE_RU_WORD = re.compile(r"[а-яё]{2,}", re.IGNORECASE)
@@ -70,15 +69,42 @@ def html_to_text(html: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    # Приводим к нижнему регистру
     text = text.lower()
-
-    # Берём только слова из русских букв
     tokens = RE_RU_WORD.findall(text)
 
-    # Мини-фильтр от мусора: очень длинные "слова" часто бывают мусором
     tokens = [t for t in tokens if 2 <= len(t) <= 40]
     return tokens
+
+
+def process_page(html: str, morph, bad_pos: set) -> tuple[list[str], dict[str, set[str]]]:
+    """Из HTML страницы извлекает токены и группу лемма->токены для этой страницы."""
+    text = html_to_text(html)
+    raw_tokens = tokenize(text)
+
+    tokens_set: set[str] = set()
+    lemma_to_tokens: dict[str, set[str]] = {}
+
+    for tok in raw_tokens:
+        if any(ch.isdigit() for ch in tok):
+            continue
+        parses = morph.parse(tok)
+        if not parses:
+            continue
+        p = parses[0]
+        pos = p.tag.POS
+        lemma = p.normal_form
+        if pos in bad_pos:
+            continue
+        if not RE_RU_WORD.fullmatch(lemma) or not (2 <= len(lemma) <= 40):
+            continue
+
+        tokens_set.add(tok)
+        if lemma not in lemma_to_tokens:
+            lemma_to_tokens[lemma] = set()
+        lemma_to_tokens[lemma].add(tok)
+
+    tokens_list = sorted(tokens_set)
+    return tokens_list, lemma_to_tokens
 
 
 def main():
@@ -87,69 +113,40 @@ def main():
 
     dict_path = pymorphy2_dicts_ru.get_path()
     morph = pymorphy2.MorphAnalyzer(path=dict_path)
+    bad_pos = {"PREP", "CONJ", "PRCL", "INTJ"}
 
-    # 1) Собираем все токены из всех файлов
-    all_tokens = []
-    files = sorted(glob.glob(os.path.join(PAGES_DIR, "*.txt")))
+    def page_number(path):
+        name = os.path.splitext(os.path.basename(path))[0]
+        try:
+            return int(name)
+        except ValueError:
+            return 0
+
+    files = sorted(glob.glob(os.path.join(PAGES_DIR, "*.txt")), key=page_number)
     if not files:
         raise FileNotFoundError(f"В {PAGES_DIR}/ нет *.txt файлов")
 
     for path in files:
+        base = os.path.splitext(os.path.basename(path))[0]
+        page_dir = os.path.join(OUTPUT_DIR, f"page{base}")
+        os.makedirs(page_dir, exist_ok=True)
+
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             html = f.read()
-        text = html_to_text(html)
-        all_tokens.extend(tokenize(text))
 
-    # 2) убираем служебные части речи (союзы, предлоги, частицы и т.д.)
-    # PREP (предлог), CONJ (союз), PRCL (частица), INTJ (междометие)
-    bad_pos = {"PREP", "CONJ", "PRCL", "INTJ"}
+        tokens_list, lemma_to_tokens = process_page(html, morph, bad_pos)
 
-    tokens_set: set[str] = set()
-    lemma_to_tokens: dict[str, set[str]] = {}
+        with open(os.path.join(page_dir, "tokens.txt"), "w", encoding="utf-8") as f:
+            for t in tokens_list:
+                f.write(t + "\n")
 
-    for tok in all_tokens:
-        # убрать слова, содержащие цифры
-        if any(ch.isdigit() for ch in tok):
-            continue
-
-        # анализ
-        parses = morph.parse(tok)
-        if not parses:
-            continue
-        p = parses[0]
-        pos = p.tag.POS  # часть речи
-        lemma = p.normal_form
-
-        # не берём служебные слова
-        if pos in bad_pos:
-            continue
-
-        # доп. защита от "мусора": лемма должна быть русской и адекватной длины
-        if not RE_RU_WORD.fullmatch(lemma) or not (2 <= len(lemma) <= 40):
-            continue
-
-        tokens_set.add(tok)
-
-        if lemma not in lemma_to_tokens:
-            lemma_to_tokens[lemma] = set()
-        lemma_to_tokens[lemma].add(tok)
-
-    # Запись tokens.txt
-    tokens_list = sorted(tokens_set)
-    with open(TOKENS_OUT, "w", encoding="utf-8") as f:
-        for t in tokens_list:
-            f.write(t + "\n")
-
-    # Запись lemmas.txt
-    with open(LEMMAS_OUT, "w", encoding="utf-8") as f:
-        for lemma in sorted(lemma_to_tokens.keys()):
-            toks = sorted(lemma_to_tokens[lemma])
-            f.write(lemma + " " + " ".join(toks) + "\n")
+        with open(os.path.join(page_dir, "lemmas.txt"), "w", encoding="utf-8") as f:
+            for lemma in sorted(lemma_to_tokens.keys()):
+                toks = sorted(lemma_to_tokens[lemma])
+                f.write(lemma + " " + " ".join(toks) + "\n")
 
     print("Готово!")
-    print(f"- Уникальных токенов: {len(tokens_list)} -> {TOKENS_OUT}")
-    print(f"- Лемм: {len(lemma_to_tokens)} -> {LEMMAS_OUT}")
-
+    print(f"- Обработано страниц: {len(files)}")
 
 if __name__ == "__main__":
     main()
